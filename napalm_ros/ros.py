@@ -320,6 +320,8 @@ class ROSDriver(NetworkDriver):
         environment['memory'] = {'available_ram': total_memory, 'used_ram': int(total_memory - free_memory)}
 
         for entry in self.api('/system/health/print'):
+            if entry['value'] == 'n/a':
+                continue
             if 'temperature' in entry['name']:
                 name = entry['name'].replace('-temperature', '')
                 temperature = float(entry['value'])
