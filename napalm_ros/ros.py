@@ -6,6 +6,7 @@ from itertools import chain
 import socket
 import ssl
 import re
+from packaging.version import parse as version_parse
 import paramiko
 import pkg_resources
 
@@ -59,6 +60,7 @@ class ROSDriver(NetworkDriver):
         self.password = password
         self.timeout = timeout
         self.optional_args = optional_args or {}
+        self.version = None
 
         self.username = self.optional_args.get('username', username)
         self.password = self.optional_args.get('password', password)
@@ -92,6 +94,7 @@ class ROSDriver(NetworkDriver):
         self.ssl_wrapper = self.optional_args.get('ssl_wrapper', librouteros.DEFAULTS['ssl_wrapper'])
         self.port = self.optional_args.get('port', 8729 if 'ssl_wrapper' in self.optional_args else 8728)
         self.ssh_port = self.optional_args.get('ssh_port', 22)
+        self.paramiko_look_for_keys = self.optional_args.get('paramiko_look_for_keys', False)
         self.api = None
         self.ssh = None
 
@@ -270,7 +273,7 @@ class ROSDriver(NetworkDriver):
             ifaces = LLDPInterfaces.fromApi(entry['interface'])
             table[ifaces.child].append(dict(
                 hostname=entry['identity'],
-                port=entry['interface-name'],
+                port=entry.get('interface-name', ''),
             ))
         return table
 
@@ -340,11 +343,11 @@ class ROSDriver(NetworkDriver):
                 environment['temperature'][name] = {'temperature': temperature, 'is_alert': False, 'is_critical': False}
             elif 'speed' in entry['name']:
                 name = entry['name'].replace('-speed', '')
-                status = (int(entry['value']) > 50)
+                status = int(entry['value']) > 50
                 environment['fans'][name] = {'status': status}
             elif 'state' in entry['name']:
                 name = entry['name'].replace('-state', '')
-                status = (entry['value'] == 'ok')
+                status = entry['value'] == 'ok'
                 environment['power'][name] = {'status': status, 'capacity': 0.0, 'output': 0.0}
 
         for cpu_values in self.api('/system/resource/cpu/print'):
@@ -376,15 +379,26 @@ class ROSDriver(NetworkDriver):
 
     def get_config(self, retrieve='all', full=False, sanitized=False):
         configs = {'running': '', 'candidate': '', 'startup': ''}
-        command = "export terse"
+        command = ["export", "terse"]
+        version = tuple(self.api('/system/package/update/print'))[0]
+        version = version_parse(version['installed-version'])
         if full:
-            command = command + " verbose"
-        if not sanitized:
-            command = command + " show-sensitive"
-        self.ssh.connect(self.hostname, port=self.ssh_port, username=self.username, password=self.password)
-        _, stdout, _ = self.ssh.exec_command(command)
+            command.append("verbose")
+        if version.major >= 7 and not sanitized:
+            command.append("show-sensitive")
+        if version.major <= 6 and sanitized:
+            command.append("hide-sensitive")
+        self.ssh.connect(
+            self.hostname,
+            port=self.ssh_port,
+            username=self.username,
+            password=self.password,
+            look_for_keys=self.paramiko_look_for_keys,
+        )
+        _, stdout, _ = self.ssh.exec_command(" ".join(command))
         config = stdout.read().decode().strip()
-        config = re.sub(r"^# \S+ \S+ by (.+)$", r'# by \1', config, flags=re.MULTILINE)  # remove date/time in 1st line
+        # remove date/time in 1st line
+        config = re.sub(r"^# \S+ \S+ by (.+)$", r'# by \1', config, flags=re.MULTILINE)
         if retrieve in ("running", "all"):
             configs['running'] = config
         return configs
